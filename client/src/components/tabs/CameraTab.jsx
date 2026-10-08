@@ -1,6 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { playBeep, playSuccessFanfare } from '../../utils/audioSynth';
-import { calculateDynamicAngle, drawSkeletalCanvas } from '../../utils/poseKinematics';
+import {
+  calculate3PointAngle,
+  calculateDynamicAngle,
+  drawSkeletalCanvas,
+  drawRealPoseLandmarks,
+} from '../../utils/poseKinematics';
 
 export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) {
   const [exercise, setExercise] = useState('pushups');
@@ -11,30 +16,46 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
   const [isSimulationActive, setIsSimulationActive] = useState(false);
   const [currentAngle, setCurrentAngle] = useState(170);
   const [poseState, setPoseState] = useState({ text: 'Yuqori Nuqta', color: 'text-amber-400' });
-  const [feedback, setFeedback] = useState({ text: "To'g'ri turish! Boshlang", status: 'idle' });
+  const [feedback, setFeedback] = useState({ text: "Kamerani yoqing yoki AI Demoni ko'ring", status: 'idle' });
   const [fps, setFps] = useState(60);
+  const [isAiDetecting, setIsAiDetecting] = useState(false);
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
+  const poseEngineRef = useRef(null);
+  const cameraHelperRef = useRef(null);
   const animFrameIdRef = useRef(null);
   const posePhaseRef = useRef(0);
   const inRepCycleRef = useRef(false);
+  const lastRepTimeRef = useRef(0);
   const lastTimeRef = useRef(performance.now());
   const frameCountRef = useRef(0);
+  const isWebcamActiveRef = useRef(false);
+  const isSimulationActiveRef = useRef(false);
+  const exerciseRef = useRef(exercise);
 
-  // Constants
-  const repThresholdLow = 85;
-  const repThresholdHigh = 155;
+  exerciseRef.current = exercise;
+  isWebcamActiveRef.current = isWebcamActive;
+  isSimulationActiveRef.current = isSimulationActive;
+
+  // Thresholds
+  const repThresholdLow = exercise === 'pushups' ? 90 : exercise === 'squats' ? 95 : 110;
+  const repThresholdHigh = exercise === 'pushups' ? 155 : exercise === 'squats' ? 155 : 150;
 
   const exerciseNames = {
     pushups: "Otjimaniya (Push-ups)",
     squats: "Prisedaniya (Squats)",
-    press: "Press (Crunches)"
+    press: "Press (Crunches)",
   };
 
-  // Rep cycle processor
+  // Rep completion
   const handleRepCompletion = useCallback(() => {
+    const now = Date.now();
+    // Debounce to prevent rapid double-counting (at least 450ms between reps)
+    if (now - lastRepTimeRef.current < 450) return;
+    lastRepTimeRef.current = now;
+
     setCurrentReps((prev) => {
       const nextReps = prev + 1;
       setCaloriesBurned((c) => +(c + 0.45).toFixed(1));
@@ -51,14 +72,15 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
     });
   }, [targetReps, soundEnabled, onAddXP, onDuelRep]);
 
-  // Main canvas animation loop
-  const runAnimationLoop = useCallback(() => {
+  // Real-time MediaPipe Pose processor
+  const handleRealPoseResults = useCallback((results) => {
+    if (!isWebcamActiveRef.current) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Resize canvas to client display size dynamically
     const width = canvas.clientWidth || 640;
     const height = canvas.clientHeight || 480;
     if (canvas.width !== width || canvas.height !== height) {
@@ -66,33 +88,63 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
       canvas.height = height;
     }
 
-    // Clear canvas
     ctx.clearRect(0, 0, width, height);
 
-    // Harmonic motion progression
-    posePhaseRef.current += 0.045;
-    const cycleProgress = (Math.sin(posePhaseRef.current) + 1) / 2; // 0.0 (top) to 1.0 (bottom)
+    if (results.poseLandmarks && results.poseLandmarks.length > 0) {
+      setIsAiDetecting(true);
+      const lm = results.poseLandmarks;
+      let calculatedAngle = 175;
 
-    // Calculate joint angle
-    const calculatedAngle = calculateDynamicAngle(exercise, cycleProgress);
-    setCurrentAngle(calculatedAngle);
+      const currentEx = exerciseRef.current;
 
-    // State machine for rep detection
-    if (calculatedAngle <= repThresholdLow && !inRepCycleRef.current) {
-      inRepCycleRef.current = true;
-      setPoseState({ text: "Quyi Nuqta (Zo'r!)", color: 'text-emerald-400' });
-      setFeedback({ text: "Yaxshi chuqurlik! Endi ko'taring", status: 'low' });
-      playBeep(440, 'sine', 0.06, soundEnabled);
-    } else if (calculatedAngle >= repThresholdHigh && inRepCycleRef.current) {
-      inRepCycleRef.current = false;
-      setPoseState({ text: "Yuqori Nuqta", color: 'text-cyan-400' });
-      setFeedback({ text: "Takrorlandi! +1 🔥", status: 'counted' });
-      playBeep(880, 'triangle', 0.12, soundEnabled);
-      handleRepCompletion();
+      if (currentEx === 'pushups') {
+        // Measure left and right arm angle (Shoulder - Elbow - Wrist)
+        const leftElbowAngle = calculate3PointAngle(lm[11], lm[13], lm[15]);
+        const rightElbowAngle = calculate3PointAngle(lm[12], lm[14], lm[16]);
+
+        // Choose arm with higher landmark visibility
+        const leftVis = (lm[11]?.visibility || 0) + (lm[13]?.visibility || 0) + (lm[15]?.visibility || 0);
+        const rightVis = (lm[12]?.visibility || 0) + (lm[14]?.visibility || 0) + (lm[16]?.visibility || 0);
+        calculatedAngle = rightVis > leftVis ? rightElbowAngle : leftElbowAngle;
+      } else if (currentEx === 'squats') {
+        // Measure knee angle (Hip - Knee - Ankle)
+        const leftKneeAngle = calculate3PointAngle(lm[23], lm[25], lm[27]);
+        const rightKneeAngle = calculate3PointAngle(lm[24], lm[26], lm[28]);
+
+        const leftVis = (lm[23]?.visibility || 0) + (lm[25]?.visibility || 0) + (lm[27]?.visibility || 0);
+        const rightVis = (lm[24]?.visibility || 0) + (lm[26]?.visibility || 0) + (lm[28]?.visibility || 0);
+        calculatedAngle = rightVis > leftVis ? rightKneeAngle : leftKneeAngle;
+      } else {
+        // Press / Crunches (Shoulder - Hip - Knee)
+        const leftTorsoAngle = calculate3PointAngle(lm[11], lm[23], lm[25]);
+        const rightTorsoAngle = calculate3PointAngle(lm[12], lm[24], lm[26]);
+        calculatedAngle = Math.min(leftTorsoAngle, rightTorsoAngle);
+      }
+
+      // Smooth angle bounds
+      calculatedAngle = Math.max(40, Math.min(180, calculatedAngle));
+      setCurrentAngle(calculatedAngle);
+
+      // REAL REP COUNTER MACHINE (Only triggers on actual movement!)
+      if (calculatedAngle <= repThresholdLow && !inRepCycleRef.current) {
+        inRepCycleRef.current = true;
+        setPoseState({ text: "Quyi Nuqta (Zo'r!)", color: 'text-emerald-400' });
+        setFeedback({ text: "Yaxshi chuqurlik! Endi ko'taring", status: 'low' });
+        playBeep(440, 'sine', 0.06, soundEnabled);
+      } else if (calculatedAngle >= repThresholdHigh && inRepCycleRef.current) {
+        inRepCycleRef.current = false;
+        setPoseState({ text: "Yuqori Nuqta", color: 'text-cyan-400' });
+        setFeedback({ text: "Takrorlandi! +1 🔥", status: 'counted' });
+        playBeep(880, 'triangle', 0.12, soundEnabled);
+        handleRepCompletion();
+      }
+
+      // Draw real skeletal lines on live camera
+      drawRealPoseLandmarks(ctx, lm, width, height, currentEx, calculatedAngle);
+    } else {
+      setIsAiDetecting(false);
+      setFeedback({ text: "Odam qidirilmoqda... Kadrga to'liq kiring", status: 'idle' });
     }
-
-    // Draw skeletal mesh and angle on canvas
-    drawSkeletalCanvas(ctx, width, height, exercise, cycleProgress, calculatedAngle);
 
     // FPS calculation
     frameCountRef.current++;
@@ -102,35 +154,93 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
       frameCountRef.current = 0;
       lastTimeRef.current = now;
     }
+  }, [repThresholdLow, repThresholdHigh, soundEnabled, handleRepCompletion]);
 
-    animFrameIdRef.current = requestAnimationFrame(runAnimationLoop);
-  }, [exercise, soundEnabled, handleRepCompletion]);
+  // Initialize MediaPipe Pose Engine
+  const initPoseEngine = useCallback(async () => {
+    if (window.Pose) {
+      try {
+        const pose = new window.Pose({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
+        });
 
-  // Start/stop loop effect
-  useEffect(() => {
-    if (isWebcamActive || isSimulationActive) {
-      animFrameIdRef.current = requestAnimationFrame(runAnimationLoop);
-    } else {
-      if (animFrameIdRef.current) {
-        cancelAnimationFrame(animFrameIdRef.current);
-      }
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext('2d');
-        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        pose.setOptions({
+          modelComplexity: 1,
+          smoothLandmarks: true,
+          enableSegmentation: false,
+          smoothSegmentation: false,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+
+        pose.onResults(handleRealPoseResults);
+        poseEngineRef.current = pose;
+        return pose;
+      } catch (err) {
+        console.warn("MediaPipe Pose load error:", err);
       }
     }
+    return null;
+  }, [handleRealPoseResults]);
 
-    return () => {
-      if (animFrameIdRef.current) {
-        cancelAnimationFrame(animFrameIdRef.current);
-      }
-    };
-  }, [isWebcamActive, isSimulationActive, runAnimationLoop]);
+  // Virtual AI Simulation loop (Only used when user explicitly clicks 'AI Demo' without camera)
+  const runSimulationLoop = useCallback(() => {
+    if (!isSimulationActiveRef.current || isWebcamActiveRef.current) return;
 
-  // Handle webcam stream start/stop
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const width = canvas.clientWidth || 640;
+    const height = canvas.clientHeight || 480;
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+
+    ctx.clearRect(0, 0, width, height);
+
+    posePhaseRef.current += 0.045;
+    const cycleProgress = (Math.sin(posePhaseRef.current) + 1) / 2;
+
+    const calculatedAngle = calculateDynamicAngle(exerciseRef.current, cycleProgress);
+    setCurrentAngle(calculatedAngle);
+
+    if (calculatedAngle <= repThresholdLow && !inRepCycleRef.current) {
+      inRepCycleRef.current = true;
+      setPoseState({ text: "Quyi Nuqta (Demo)", color: 'text-emerald-400' });
+      setFeedback({ text: "Yaxshi chuqurlik! (Demo)", status: 'low' });
+      playBeep(440, 'sine', 0.06, soundEnabled);
+    } else if (calculatedAngle >= repThresholdHigh && inRepCycleRef.current) {
+      inRepCycleRef.current = false;
+      setPoseState({ text: "Yuqori Nuqta", color: 'text-cyan-400' });
+      setFeedback({ text: "Takrorlandi! +1 🔥 (Demo)", status: 'counted' });
+      playBeep(880, 'triangle', 0.12, soundEnabled);
+      handleRepCompletion();
+    }
+
+    drawSkeletalCanvas(ctx, width, height, exerciseRef.current, cycleProgress, calculatedAngle);
+
+    frameCountRef.current++;
+    const now = performance.now();
+    if (now - lastTimeRef.current >= 1000) {
+      setFps(frameCountRef.current);
+      frameCountRef.current = 0;
+      lastTimeRef.current = now;
+    }
+
+    animFrameIdRef.current = requestAnimationFrame(runSimulationLoop);
+  }, [repThresholdLow, repThresholdHigh, soundEnabled, handleRepCompletion]);
+
+  // Turn ON / OFF Webcam
   const toggleWebcam = async () => {
     if (isWebcamActive) {
+      // Stop Camera
+      if (cameraHelperRef.current) {
+        cameraHelperRef.current.stop();
+        cameraHelperRef.current = null;
+      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
@@ -139,42 +249,110 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
         videoRef.current.srcObject = null;
       }
       setIsWebcamActive(false);
-      setIsSimulationActive(false);
+      setIsAiDetecting(false);
+      inRepCycleRef.current = false;
+      setFeedback({ text: "Kamera to'xtatildi", status: 'idle' });
       return;
     }
 
+    // Start Real Camera with MediaPipe
     try {
-      const constraints = {
+      setIsSimulationActive(false);
+      if (animFrameIdRef.current) {
+        cancelAnimationFrame(animFrameIdRef.current);
+      }
+
+      setFeedback({ text: "Kamera va AI Pose ishga tushirilmoqda...", status: 'idle' });
+
+      let pose = poseEngineRef.current;
+      if (!pose) {
+        pose = await initPoseEngine();
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
         audio: false,
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      });
       streamRef.current = stream;
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.play();
+        await videoRef.current.play();
+
+        // Feed video frames directly to MediaPipe Pose
+        if (window.Camera && pose) {
+          const camera = new window.Camera(videoRef.current, {
+            onFrame: async () => {
+              if (videoRef.current && isWebcamActiveRef.current && poseEngineRef.current) {
+                await poseEngineRef.current.send({ image: videoRef.current });
+              }
+            },
+            width: 640,
+            height: 480,
+          });
+          camera.start();
+          cameraHelperRef.current = camera;
+        } else {
+          // Manual requestAnimationFrame pipeline fallback
+          const processFrame = async () => {
+            if (!isWebcamActiveRef.current) return;
+            if (videoRef.current && poseEngineRef.current && videoRef.current.readyState >= 2) {
+              await poseEngineRef.current.send({ image: videoRef.current });
+            }
+            requestAnimationFrame(processFrame);
+          };
+          requestAnimationFrame(processFrame);
+        }
       }
+
       setIsWebcamActive(true);
-      setIsSimulationActive(true);
+      inRepCycleRef.current = false;
+      setFeedback({ text: "To'g'ri turing! Harakat qilganingizdagina sanaydi", status: 'idle' });
     } catch (err) {
-      console.warn("Camera access unavailable, fallback to virtual AI simulation:", err);
-      setIsSimulationActive(true);
+      console.warn("Kamera ruxsati berilmadi:", err);
+      alert("Kameraga ruxsat berilmadi yoki ulanmadi. Brauzerda kameraga ruxsat bering!");
     }
   };
 
+  // Toggle AI Demo (Virtual Simulation)
   const toggleSimulation = () => {
-    if (isSimulationActive && !isWebcamActive) {
+    if (isWebcamActive) {
+      // If camera is on, stop camera first
+      toggleWebcam();
+    }
+
+    if (isSimulationActive) {
       setIsSimulationActive(false);
+      if (animFrameIdRef.current) {
+        cancelAnimationFrame(animFrameIdRef.current);
+      }
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      setFeedback({ text: "AI Demo to'xtatildi", status: 'idle' });
     } else {
       setIsSimulationActive(true);
+      setFeedback({ text: "AI Demo (Virtual Rejim) ishga tushdi", status: 'idle' });
+      animFrameIdRef.current = requestAnimationFrame(runSimulationLoop);
     }
   };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (cameraHelperRef.current) cameraHelperRef.current.stop();
+      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+      if (animFrameIdRef.current) cancelAnimationFrame(animFrameIdRef.current);
+    };
+  }, []);
 
   const handleReset = () => {
     setCurrentReps(0);
     setCaloriesBurned(0);
     inRepCycleRef.current = false;
-    setFeedback({ text: "Hisob qaytarildi. Boshlang!", status: 'idle' });
+    setFeedback({ text: "Hisob qaytarildi. Mashqni boshlang!", status: 'idle' });
   };
 
   const adjustTarget = (delta) => {
@@ -186,7 +364,6 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
     handleReset();
   };
 
-  // Progress circle calculate
   const pct = Math.min(currentReps / targetReps, 1.0);
   const circleOffset = 175.9 - 175.9 * pct;
 
@@ -196,7 +373,7 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
       <div className="sm:hidden flex items-center justify-between bg-emerald-950/40 border border-emerald-500/30 px-3 py-2 rounded-xl text-[11px] text-emerald-300">
         <div className="flex items-center space-x-2">
           <span className="w-2 h-2 rounded-full bg-emerald-400 badge-live"></span>
-          <span>Faqat jonli kamera orqali ishlaydi (Galereya bloklangan)</span>
+          <span>Faqat jonli harakat orqali ishlaydi (Harakat qilmasangiz sanamaydi)</span>
         </div>
         <i className="fa-solid fa-shield-halved text-emerald-400"></i>
       </div>
@@ -234,11 +411,15 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
             </button>
             <button
               onClick={toggleSimulation}
-              className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-cyan-500/30 rounded-xl text-xs font-semibold flex items-center justify-center space-x-1 transition"
-              title="Kamerasiz virtual AI skeletini ko'rish"
+              className={`px-3 py-2 border rounded-xl text-xs font-semibold flex items-center justify-center space-x-1 transition ${
+                isSimulationActive
+                  ? 'bg-cyan-500 text-slate-950 border-cyan-400 font-bold'
+                  : 'bg-slate-800 hover:bg-slate-700 text-cyan-400 border-cyan-500/30'
+              }`}
+              title="Kamerasiz virtual AI namoyishini ko'rish"
             >
               <i className="fa-solid fa-robot"></i>
-              <span>{isSimulationActive && !isWebcamActive ? "To'xtatish" : "AI Demo"}</span>
+              <span>{isSimulationActive ? "Demoni to'xtatish" : "AI Demo"}</span>
             </button>
           </div>
         </div>
@@ -279,7 +460,7 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
 
       {/* Main Video & AI Skeleton Canvas Viewport */}
       <div className="relative bg-slate-950 border border-cyberBorder rounded-3xl overflow-hidden shadow-2xl flex flex-col items-center justify-center min-h-[380px] md:min-h-[490px]">
-        {/* Mirrored webcam video */}
+        {/* Mirrored live webcam video */}
         <video
           ref={videoRef}
           autoPlay
@@ -290,10 +471,10 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
           }`}
         />
 
-        {/* AI Canvas */}
+        {/* Canvas for rendering real AI detected skeleton or demo skeleton */}
         <canvas
           ref={canvasRef}
-          className="relative z-10 w-full h-full max-h-[500px] object-contain"
+          className="relative z-10 w-full h-full max-h-[500px] object-contain pointer-events-none"
         />
 
         {/* Camera Off Placeholder */}
@@ -304,7 +485,7 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
             </div>
             <h3 className="text-lg font-bold text-slate-200 mb-1">Kamera Ulanmagan</h3>
             <p className="text-xs text-slate-400 max-w-sm mb-4">
-              "Kamerani Yoqish" tugmasini bosing yoki AI mashq sanagichining qanday ishlashini ko'rish uchun "AI Demo" rejimini yoqing.
+              "Kamerani Yoqish" tugmasini bosing. AI sizning tirsak, yelka va tizza harakatlaringizni jonli kuzatadi va faqat to'liq bukilgandagina sanaydi!
             </p>
             <div className="flex flex-wrap gap-2 justify-center">
               <button
@@ -328,30 +509,48 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
         {/* Top-Left Engine HUD */}
         <div className="absolute top-4 left-4 z-20 flex flex-col space-y-2 pointer-events-none">
           <div className="bg-slate-900/85 backdrop-blur-md border border-slate-700/80 px-3 py-1.5 rounded-xl flex items-center space-x-2 shadow-md">
-            <div className={`w-2.5 h-2.5 rounded-full ${isWebcamActive || isSimulationActive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`}></div>
+            <div
+              className={`w-2.5 h-2.5 rounded-full ${
+                isWebcamActive && isAiDetecting
+                  ? 'bg-emerald-400 animate-pulse'
+                  : isWebcamActive
+                  ? 'bg-amber-400 animate-pulse'
+                  : isSimulationActive
+                  ? 'bg-cyan-400 animate-pulse'
+                  : 'bg-slate-500'
+              }`}
+            ></div>
             <span className="text-xs font-bold text-slate-200">
-              {isWebcamActive ? "Jonli WebRTC Kamera: Faol" : isSimulationActive ? "AI Virtual Skelet Faol" : "AI Pose Engine: Kutilmoqda"}
+              {isWebcamActive && isAiDetecting
+                ? "Jonli AI Biometriya: Odam Aniqlangan"
+                : isWebcamActive
+                ? "Kamera Faol: Odam kutilmoqda"
+                : isSimulationActive
+                ? "AI Demo: Virtual Skelet"
+                : "AI Pose Engine: Kutilmoqda"}
             </span>
           </div>
           <div className="bg-slate-900/85 backdrop-blur-md border border-slate-700/80 px-3 py-1 rounded-xl text-[11px] text-slate-300">
-            Burchak: <span className="font-mono font-bold text-emerald-400">{currentAngle}°</span>
+            Haqiqiy Burchak: <span className="font-mono font-bold text-emerald-400">{currentAngle}°</span>
           </div>
         </div>
 
         {/* Top-Right Feedback HUD */}
         <div className="absolute top-4 right-4 z-20 flex flex-col items-end space-y-2 pointer-events-none">
-          <div className={`backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-bold shadow-lg flex items-center space-x-2 transition-all duration-300 border ${
-            feedback.status === 'counted' || feedback.status === 'success'
-              ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 scale-105'
-              : feedback.status === 'low'
-              ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-              : 'bg-slate-900/80 border-slate-700 text-slate-200'
-          }`}>
+          <div
+            className={`backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-bold shadow-lg flex items-center space-x-2 transition-all duration-300 border ${
+              feedback.status === 'counted' || feedback.status === 'success'
+                ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 scale-105'
+                : feedback.status === 'low'
+                ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                : 'bg-slate-900/80 border-slate-700 text-slate-200'
+            }`}
+          >
             <i className="fa-solid fa-circle-check"></i>
             <span>{feedback.text}</span>
           </div>
           <div className="bg-slate-900/80 backdrop-blur-md px-2.5 py-1 rounded-lg text-[10px] text-slate-400 border border-slate-800">
-            FPS: <span className="text-cyan-400 font-mono">{fps}</span> | Anti-cheat: <span className="text-emerald-400 font-bold">FAOL</span>
+            FPS: <span className="text-cyan-400 font-mono">{fps}</span> | Anti-cheat: <span className="text-emerald-400 font-bold">JONLI</span>
           </div>
         </div>
 
@@ -422,8 +621,8 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
             <i className="fa-solid fa-bullseye"></i>
           </div>
           <div>
-            <h4 className="text-xs font-bold text-slate-200">2. To'liq Amplituda</h4>
-            <p className="text-[11px] text-slate-400 mt-0.5">Tirsak yoki tizzalarni 90 gradusgacha buking va to'liq yozing. AI chestniy sanaydi.</p>
+            <h4 className="text-xs font-bold text-slate-200">2. Haqiqiy Bo'g'in Boshqaruvi</h4>
+            <p className="text-[11px] text-slate-400 mt-0.5">Tirsak yoki tizzangizni 90° gacha bukmaguncha va qayta yozmaguncha sanamaydi.</p>
           </div>
         </div>
 
@@ -433,7 +632,7 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
           </div>
           <div>
             <h4 className="text-xs font-bold text-slate-200">3. Ball va XP Yig'ing</h4>
-            <p className="text-[11px] text-slate-400 mt-0.5">Har 10 ta toza takrorlash uchun +25 XP beriladi va viloyat reytingingiz ko'tariladi.</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Har 1 ta toza takrorlash uchun +10 XP beriladi va reytingingiz ko'tariladi.</p>
           </div>
         </div>
       </div>

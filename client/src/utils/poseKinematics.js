@@ -1,29 +1,40 @@
 /**
  * Pose Kinematics and Biometric Skeletal Drawing Utility
- * Calculates biomechanical angles and renders glowing cyberpunk skeletons onto Canvas.
+ * Computes exact biometric joint angles from live landmarks or simulated frames.
  */
 
 /**
- * Calculates current joint angle based on exercise type and harmonic cycle progress.
- * @param {'pushups' | 'squats' | 'press'} exercise
- * @param {number} cycleProgress - Float 0.0 to 1.0 (0=top, 1=bottom/deep)
- * @returns {number} angle in degrees
+ * Calculates real geometric angle at joint B given three landmarks A, B, C.
+ * @param {{x: number, y: number}} A - First point (e.g., Shoulder)
+ * @param {{x: number, y: number}} B - Middle joint vertex (e.g., Elbow)
+ * @param {{x: number, y: number}} C - Third point (e.g., Wrist)
+ * @returns {number} Angle in degrees (0 to 180)
+ */
+export function calculate3PointAngle(A, B, C) {
+  if (!A || !B || !C) return 180;
+  const radians = Math.atan2(C.y - B.y, C.x - B.x) - Math.atan2(A.y - B.y, A.x - B.x);
+  let angle = Math.abs((radians * 180.0) / Math.PI);
+  if (angle > 180.0) {
+    angle = 360.0 - angle;
+  }
+  return Math.round(angle);
+}
+
+/**
+ * Calculates current joint angle based on exercise type and harmonic cycle progress for AI Demo.
  */
 export function calculateDynamicAngle(exercise, cycleProgress) {
   if (exercise === 'pushups') {
-    // Elbow angle: 170 deg (extended) -> 75 deg (bottom)
     return Math.round(170 - (cycleProgress * 95));
   } else if (exercise === 'squats') {
-    // Knee angle: 175 deg (standing) -> 80 deg (deep squat)
     return Math.round(175 - (cycleProgress * 95));
   } else {
-    // Press / Crunches: Torso angle: 160 deg -> 85 deg
     return Math.round(160 - (cycleProgress * 75));
   }
 }
 
 /**
- * Computes 2D joint coordinates for skeleton rendering based on exercise & motion progress.
+ * Computes 2D joint coordinates for virtual simulated demo.
  */
 export function calculateJointPositions(exercise, progress, cx, cy) {
   let head, shoulder, elbow, wrist, hip, knee, ankle;
@@ -47,7 +58,6 @@ export function calculateJointPositions(exercise, progress, cx, cy) {
     knee = { x: cx + 35, y: cy + 40 + (squatDrop * 0.5) };
     ankle = { x: cx + 15, y: cy + 120 };
   } else {
-    // Press / Crunches
     const crunchFold = progress * 40;
     head = { x: cx - 40 - crunchFold, y: cy - 30 - crunchFold };
     shoulder = { x: cx - 20 - (crunchFold * 0.5), y: cy };
@@ -62,23 +72,88 @@ export function calculateJointPositions(exercise, progress, cx, cy) {
 }
 
 /**
- * Draws the cybernetic grid, bones, keypoint joints, and angle HUD onto the 2D canvas context.
+ * Draws real landmarks detected by MediaPipe on top of mirrored webcam feed.
+ */
+export function drawRealPoseLandmarks(ctx, landmarks, width, height, exercise, angle) {
+  if (!landmarks || landmarks.length === 0) return;
+
+  // MediaPipe connections pairs
+  const connections = [
+    [11, 12], // shoulders
+    [11, 13], [13, 15], // left arm
+    [12, 14], [14, 16], // right arm
+    [11, 23], [12, 24], // torso
+    [23, 24], // hips
+    [23, 25], [25, 27], // left leg
+    [24, 26], [26, 28], // right leg
+  ];
+
+  ctx.lineWidth = 3;
+  ctx.lineCap = "round";
+  ctx.strokeStyle = angle <= 90 ? "#10b981" : "#06b6d4";
+
+  connections.forEach(([i, j]) => {
+    const p1 = landmarks[i];
+    const p2 = landmarks[j];
+    if (p1 && p2 && (p1.visibility === undefined || p1.visibility > 0.4) && (p2.visibility === undefined || p2.visibility > 0.4)) {
+      ctx.beginPath();
+      // Mirror x coordinate because video is mirrored
+      ctx.moveTo((1 - p1.x) * width, p1.y * height);
+      ctx.lineTo((1 - p2.x) * width, p2.y * height);
+      ctx.stroke();
+    }
+  });
+
+  // Draw joints
+  landmarks.forEach((pt, idx) => {
+    // Only draw primary body landmarks
+    if ([0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28].includes(idx)) {
+      if (pt && (pt.visibility === undefined || pt.visibility > 0.4)) {
+        const x = (1 - pt.x) * width;
+        const y = pt.y * height;
+        ctx.beginPath();
+        ctx.arc(x, y, idx === 0 ? 7 : 5, 0, Math.PI * 2);
+        ctx.fillStyle = [13, 14, 25, 26].includes(idx) ? "#10b981" : "#38bdf8";
+        ctx.fill();
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+  });
+
+  // Draw angle indicator text near the primary tracked joint
+  let activeJoint = landmarks[14] || landmarks[13]; // Right/Left elbow
+  if (exercise === 'squats') {
+    activeJoint = landmarks[26] || landmarks[25]; // Right/Left knee
+  } else if (exercise === 'press') {
+    activeJoint = landmarks[24] || landmarks[23]; // Right/Left hip
+  }
+
+  if (activeJoint && (activeJoint.visibility === undefined || activeJoint.visibility > 0.3)) {
+    const x = (1 - activeJoint.x) * width;
+    const y = activeJoint.y * height;
+    ctx.fillStyle = "#f59e0b";
+    ctx.font = "bold 15px Inter, monospace";
+    ctx.fillText(`${angle}°`, x + 12, y - 10);
+  }
+}
+
+/**
+ * Draws the cybernetic simulated skeleton for AI Demo.
  */
 export function drawSkeletalCanvas(ctx, width, height, exercise, progress, angle) {
   const cx = width / 2;
   const cy = height / 2;
 
-  // Background radar aesthetic ring
   ctx.strokeStyle = "rgba(16, 185, 129, 0.15)";
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.arc(cx, cy, 140, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Joint positions
   const { head, shoulder, elbow, wrist, hip, knee, ankle } = calculateJointPositions(exercise, progress, cx, cy);
 
-  // Bones connections
   const bones = [
     [head, shoulder],
     [shoulder, elbow],
@@ -99,7 +174,6 @@ export function drawSkeletalCanvas(ctx, width, height, exercise, progress, angle
     ctx.stroke();
   });
 
-  // Joints points
   const joints = [head, shoulder, elbow, wrist, hip, knee, ankle];
   joints.forEach((pt, idx) => {
     ctx.beginPath();
@@ -111,7 +185,6 @@ export function drawSkeletalCanvas(ctx, width, height, exercise, progress, angle
     ctx.stroke();
   });
 
-  // Angle indicator arc
   const targetJoint = exercise === 'squats' ? knee : elbow;
   ctx.beginPath();
   ctx.arc(targetJoint.x, targetJoint.y, 24, 0, (angle / 180) * Math.PI);
@@ -119,7 +192,6 @@ export function drawSkeletalCanvas(ctx, width, height, exercise, progress, angle
   ctx.lineWidth = 3;
   ctx.stroke();
 
-  // Angle text next to joint
   ctx.fillStyle = "#f59e0b";
   ctx.font = "bold 13px Inter, monospace";
   ctx.fillText(`${angle}°`, targetJoint.x + 14, targetJoint.y - 10);

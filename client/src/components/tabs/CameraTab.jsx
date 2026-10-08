@@ -91,41 +91,44 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
     ctx.clearRect(0, 0, width, height);
 
     if (results.poseLandmarks && results.poseLandmarks.length > 0) {
-      setIsAiDetecting(true);
       const lm = results.poseLandmarks;
-      let calculatedAngle = 175;
-
       const currentEx = exerciseRef.current;
 
+      // Check key joint visibility
+      const leftArmVis = (lm[11]?.visibility || 0) > 0.5 && (lm[13]?.visibility || 0) > 0.5 && (lm[15]?.visibility || 0) > 0.5;
+      const rightArmVis = (lm[12]?.visibility || 0) > 0.5 && (lm[14]?.visibility || 0) > 0.5 && (lm[16]?.visibility || 0) > 0.5;
+      const leftLegVis = (lm[23]?.visibility || 0) > 0.5 && (lm[25]?.visibility || 0) > 0.5 && (lm[27]?.visibility || 0) > 0.5;
+      const rightLegVis = (lm[24]?.visibility || 0) > 0.5 && (lm[26]?.visibility || 0) > 0.5 && (lm[28]?.visibility || 0) > 0.5;
+
+      const hasVisibleBody = currentEx === 'squats' ? (leftLegVis || rightLegVis) : (leftArmVis || rightArmVis);
+
+      if (!hasVisibleBody) {
+        setIsAiDetecting(false);
+        setFeedback({ text: "Masofani to'g'rilang: 1.5 - 2 metr uzoqlashing", status: 'idle' });
+        return;
+      }
+
+      setIsAiDetecting(true);
+      let calculatedAngle = 175;
+
       if (currentEx === 'pushups') {
-        // Measure left and right arm angle (Shoulder - Elbow - Wrist)
         const leftElbowAngle = calculate3PointAngle(lm[11], lm[13], lm[15]);
         const rightElbowAngle = calculate3PointAngle(lm[12], lm[14], lm[16]);
-
-        // Choose arm with higher landmark visibility
-        const leftVis = (lm[11]?.visibility || 0) + (lm[13]?.visibility || 0) + (lm[15]?.visibility || 0);
-        const rightVis = (lm[12]?.visibility || 0) + (lm[14]?.visibility || 0) + (lm[16]?.visibility || 0);
-        calculatedAngle = rightVis > leftVis ? rightElbowAngle : leftElbowAngle;
+        calculatedAngle = rightArmVis ? rightElbowAngle : leftElbowAngle;
       } else if (currentEx === 'squats') {
-        // Measure knee angle (Hip - Knee - Ankle)
         const leftKneeAngle = calculate3PointAngle(lm[23], lm[25], lm[27]);
         const rightKneeAngle = calculate3PointAngle(lm[24], lm[26], lm[28]);
-
-        const leftVis = (lm[23]?.visibility || 0) + (lm[25]?.visibility || 0) + (lm[27]?.visibility || 0);
-        const rightVis = (lm[24]?.visibility || 0) + (lm[26]?.visibility || 0) + (lm[28]?.visibility || 0);
-        calculatedAngle = rightVis > leftVis ? rightKneeAngle : leftKneeAngle;
+        calculatedAngle = rightLegVis ? rightKneeAngle : leftKneeAngle;
       } else {
-        // Press / Crunches (Shoulder - Hip - Knee)
         const leftTorsoAngle = calculate3PointAngle(lm[11], lm[23], lm[25]);
         const rightTorsoAngle = calculate3PointAngle(lm[12], lm[24], lm[26]);
         calculatedAngle = Math.min(leftTorsoAngle, rightTorsoAngle);
       }
 
-      // Smooth angle bounds
       calculatedAngle = Math.max(40, Math.min(180, calculatedAngle));
       setCurrentAngle(calculatedAngle);
 
-      // REAL REP COUNTER MACHINE (Only triggers on actual movement!)
+      // REAL REP COUNTER (Only on genuine full movement)
       if (calculatedAngle <= repThresholdLow && !inRepCycleRef.current) {
         inRepCycleRef.current = true;
         setPoseState({ text: "Quyi Nuqta (Zo'r!)", color: 'text-emerald-400' });
@@ -139,7 +142,7 @@ export default function CameraTab({ userXP, onAddXP, soundEnabled, onDuelRep }) 
         handleRepCompletion();
       }
 
-      // Draw real skeletal lines on live camera
+      // Draw real skeletal joints on live camera
       drawRealPoseLandmarks(ctx, lm, width, height, currentEx, calculatedAngle);
     } else {
       setIsAiDetecting(false);

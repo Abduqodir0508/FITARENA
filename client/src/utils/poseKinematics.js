@@ -73,6 +73,7 @@ export function calculateJointPositions(exercise, progress, cx, cy) {
 
 /**
  * Draws real landmarks detected by MediaPipe on top of mirrored webcam feed.
+ * Clean, subtle lines directly on the user's actual body only when confidence is high.
  */
 export function drawRealPoseLandmarks(ctx, landmarks, width, height, exercise, angle) {
   if (!landmarks || landmarks.length === 0) return;
@@ -95,7 +96,7 @@ export function drawRealPoseLandmarks(ctx, landmarks, width, height, exercise, a
   connections.forEach(([i, j]) => {
     const p1 = landmarks[i];
     const p2 = landmarks[j];
-    if (p1 && p2 && (p1.visibility === undefined || p1.visibility > 0.4) && (p2.visibility === undefined || p2.visibility > 0.4)) {
+    if (p1 && p2 && (p1.visibility === undefined || p1.visibility > 0.6) && (p2.visibility === undefined || p2.visibility > 0.6)) {
       ctx.beginPath();
       // Mirror x coordinate because video is mirrored
       ctx.moveTo((1 - p1.x) * width, p1.y * height);
@@ -104,15 +105,14 @@ export function drawRealPoseLandmarks(ctx, landmarks, width, height, exercise, a
     }
   });
 
-  // Draw joints
+  // Draw joints only on valid visible limbs
   landmarks.forEach((pt, idx) => {
-    // Only draw primary body landmarks
-    if ([0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28].includes(idx)) {
-      if (pt && (pt.visibility === undefined || pt.visibility > 0.4)) {
+    if ([11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28].includes(idx)) {
+      if (pt && (pt.visibility === undefined || pt.visibility > 0.6)) {
         const x = (1 - pt.x) * width;
         const y = pt.y * height;
         ctx.beginPath();
-        ctx.arc(x, y, idx === 0 ? 7 : 5, 0, Math.PI * 2);
+        ctx.arc(x, y, 4.5, 0, Math.PI * 2);
         ctx.fillStyle = [13, 14, 25, 26].includes(idx) ? "#10b981" : "#38bdf8";
         ctx.fill();
         ctx.strokeStyle = "#ffffff";
@@ -121,36 +121,14 @@ export function drawRealPoseLandmarks(ctx, landmarks, width, height, exercise, a
       }
     }
   });
-
-  // Draw angle indicator text near the primary tracked joint
-  let activeJoint = landmarks[14] || landmarks[13]; // Right/Left elbow
-  if (exercise === 'squats') {
-    activeJoint = landmarks[26] || landmarks[25]; // Right/Left knee
-  } else if (exercise === 'press') {
-    activeJoint = landmarks[24] || landmarks[23]; // Right/Left hip
-  }
-
-  if (activeJoint && (activeJoint.visibility === undefined || activeJoint.visibility > 0.3)) {
-    const x = (1 - activeJoint.x) * width;
-    const y = activeJoint.y * height;
-    ctx.fillStyle = "#f59e0b";
-    ctx.font = "bold 15px Inter, monospace";
-    ctx.fillText(`${angle}°`, x + 12, y - 10);
-  }
 }
 
 /**
- * Draws the cybernetic simulated skeleton for AI Demo.
+ * Draws the cybernetic simulated skeleton strictly for AI Demo mode only.
  */
 export function drawSkeletalCanvas(ctx, width, height, exercise, progress, angle) {
   const cx = width / 2;
   const cy = height / 2;
-
-  ctx.strokeStyle = "rgba(16, 185, 129, 0.15)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.arc(cx, cy, 140, 0, Math.PI * 2);
-  ctx.stroke();
 
   const { head, shoulder, elbow, wrist, hip, knee, ankle } = calculateJointPositions(exercise, progress, cx, cy);
 
@@ -177,7 +155,7 @@ export function drawSkeletalCanvas(ctx, width, height, exercise, progress, angle
   const joints = [head, shoulder, elbow, wrist, hip, knee, ankle];
   joints.forEach((pt, idx) => {
     ctx.beginPath();
-    ctx.arc(pt.x, pt.y, idx === 0 ? 10 : 6, 0, Math.PI * 2);
+    ctx.arc(pt.x, pt.y, idx === 0 ? 9 : 6, 0, Math.PI * 2);
     ctx.fillStyle = idx === 2 || idx === 5 ? "#10b981" : "#38bdf8";
     ctx.fill();
     ctx.strokeStyle = "#ffffff";
@@ -187,12 +165,12 @@ export function drawSkeletalCanvas(ctx, width, height, exercise, progress, angle
 
   const targetJoint = exercise === 'squats' ? knee : elbow;
   ctx.beginPath();
-  ctx.arc(targetJoint.x, targetJoint.y, 24, 0, (angle / 180) * Math.PI);
+  ctx.arc(targetJoint.x, targetJoint.y, 20, 0, (angle / 180) * Math.PI);
   ctx.strokeStyle = "rgba(245, 158, 11, 0.8)";
-  ctx.lineWidth = 3;
+  ctx.lineWidth = 2.5;
   ctx.stroke();
 
   ctx.fillStyle = "#f59e0b";
   ctx.font = "bold 13px Inter, monospace";
-  ctx.fillText(`${angle}°`, targetJoint.x + 14, targetJoint.y - 10);
+  ctx.fillText(`${angle}°`, targetJoint.x + 12, targetJoint.y - 8);
 }

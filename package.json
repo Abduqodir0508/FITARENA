@@ -1,0 +1,11 @@
+{
+  "name": "fitarena-root",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "cd client && npm install && npm run build",
+    "start": "cd client && npm run dev",
+    "client": "npm run dev --prefix client",
+    "server": "npm run dev --prefix server"
+  }
+}

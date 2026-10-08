@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import {
   playBeep,
@@ -6,6 +6,10 @@ import {
   playSuccessFanfare,
   playDefeatSound,
 } from '../../utils/audioSynth';
+import {
+  calculate3PointAngle,
+  drawRealPoseLandmarks,
+} from '../../utils/poseKinematics';
 import DuelResultModal from '../modals/DuelResultModal';
 
 const mockOpponents = [
@@ -28,12 +32,163 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
   const [matchStatus, setMatchStatus] = useState("Kutilmoqda");
   const [oppPulse, setOppPulse] = useState(false);
 
+  // Live Camera states inside Duel
+  const [isWebcamActive, setIsWebcamActive] = useState(false);
+  const [currentAngle, setCurrentAngle] = useState(170);
+  const [isAiDetecting, setIsAiDetecting] = useState(false);
+
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const cameraHelperRef = useRef(null);
+  const poseEngineRef = useRef(null);
   const socketRef = useRef(null);
   const timerIntervalRef = useRef(null);
   const oppIntervalRef = useRef(null);
   const searchTimeoutRef = useRef(null);
+  const inRepCycleRef = useRef(false);
+  const lastRepTimeRef = useRef(0);
+  const inDuelRef = useRef(false);
+  const isWebcamActiveRef = useRef(false);
 
-  // Initialize socket connection if available
+  inDuelRef.current = inDuel;
+  isWebcamActiveRef.current = isWebcamActive;
+
+  // Handle automatic score increment from live camera pushup detection
+  const handleCameraRep = useCallback(() => {
+    const now = Date.now();
+    if (now - lastRepTimeRef.current < 450) return;
+    lastRepTimeRef.current = now;
+
+    setUserScore((prev) => {
+      const nextScore = prev + 1;
+      playBeep(750, 'triangle', 0.08, soundEnabled);
+
+      if (socketRef.current && socketRef.current.connected && inDuelRef.current) {
+        socketRef.current.emit('update_score', { score: nextScore });
+      }
+      return nextScore;
+    });
+  }, [soundEnabled]);
+
+  // Real-time MediaPipe Pose processor for Duel camera
+  const handleDuelPoseResults = useCallback((results) => {
+    if (!isWebcamActiveRef.current) return;
+
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const width = canvas.clientWidth || 320;
+    const height = canvas.clientHeight || 240;
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+
+    ctx.clearRect(0, 0, width, height);
+
+    if (results.poseLandmarks && results.poseLandmarks.length > 0) {
+      const lm = results.poseLandmarks;
+
+      const leftArmVis = (lm[11]?.visibility || 0) > 0.5 && (lm[13]?.visibility || 0) > 0.5 && (lm[15]?.visibility || 0) > 0.5;
+      const rightArmVis = (lm[12]?.visibility || 0) > 0.5 && (lm[14]?.visibility || 0) > 0.5 && (lm[16]?.visibility || 0) > 0.5;
+
+      if (!leftArmVis && !rightArmVis) {
+        setIsAiDetecting(false);
+        return;
+      }
+
+      setIsAiDetecting(true);
+      const leftElbowAngle = calculate3PointAngle(lm[11], lm[13], lm[15]);
+      const rightElbowAngle = calculate3PointAngle(lm[12], lm[14], lm[16]);
+      let calculatedAngle = rightArmVis ? rightElbowAngle : leftElbowAngle;
+      calculatedAngle = Math.max(40, Math.min(180, calculatedAngle));
+      setCurrentAngle(calculatedAngle);
+
+      // Duel Pushup Rep Cycle: Low <= 90 deg, High >= 155 deg
+      if (calculatedAngle <= 90 && !inRepCycleRef.current) {
+        inRepCycleRef.current = true;
+        playBeep(440, 'sine', 0.05, soundEnabled);
+      } else if (calculatedAngle >= 155 && inRepCycleRef.current) {
+        inRepCycleRef.current = false;
+        handleCameraRep();
+      }
+
+      drawRealPoseLandmarks(ctx, lm, width, height, 'pushups', calculatedAngle);
+    } else {
+      setIsAiDetecting(false);
+    }
+  }, [soundEnabled, handleCameraRep]);
+
+  // Turn ON / OFF Camera in Duel
+  const toggleDuelWebcam = async () => {
+    if (isWebcamActive) {
+      if (cameraHelperRef.current) {
+        cameraHelperRef.current.stop();
+        cameraHelperRef.current = null;
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      setIsWebcamActive(false);
+      setIsAiDetecting(false);
+      return;
+    }
+
+    try {
+      if (window.Pose && !poseEngineRef.current) {
+        const pose = new window.Pose({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
+        });
+        pose.setOptions({
+          modelComplexity: 1,
+          smoothLandmarks: true,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+        pose.onResults(handleDuelPoseResults);
+        poseEngineRef.current = pose;
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+        audio: false,
+      });
+      streamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+
+        if (window.Camera && poseEngineRef.current) {
+          const camera = new window.Camera(videoRef.current, {
+            onFrame: async () => {
+              if (videoRef.current && isWebcamActiveRef.current && poseEngineRef.current) {
+                await poseEngineRef.current.send({ image: videoRef.current });
+              }
+            },
+            width: 640,
+            height: 480,
+          });
+          camera.start();
+          cameraHelperRef.current = camera;
+        }
+      }
+
+      setIsWebcamActive(true);
+    } catch (err) {
+      console.warn("Duel camera error:", err);
+      alert("Kameraga ulanib bo'lmadi. Brauzerda ruxsat bering!");
+    }
+  };
+
+  // Socket setup
   useEffect(() => {
     try {
       const socket = io('/', {
@@ -67,7 +222,7 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
         socket.disconnect();
       };
     } catch (e) {
-      console.warn("Socket.io init notice:", e);
+      console.warn("Socket.io notice:", e);
     }
   }, []);
 
@@ -80,6 +235,11 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
     setIsSearching(true);
     playBeep(587, 'sine', 0.1, soundEnabled);
 
+    // Auto-turn on camera if not active yet
+    if (!isWebcamActive) {
+      toggleDuelWebcam();
+    }
+
     if (socketRef.current && socketRef.current.connected) {
       socketRef.current.emit('join_queue', {
         name: "Siz (Mening Profilim)",
@@ -88,7 +248,6 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
       });
     }
 
-    // Fallback simulation if socket server has no other player in queue
     searchTimeoutRef.current = setTimeout(() => {
       const randomOpp = mockOpponents[Math.floor(Math.random() * mockOpponents.length)];
       setOpponent(randomOpp);
@@ -119,11 +278,9 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
       onStartDuelSession();
     }
 
-    // Clear previous intervals
     clearInterval(timerIntervalRef.current);
     clearInterval(oppIntervalRef.current);
 
-    // Countdown timer
     timerIntervalRef.current = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
@@ -138,7 +295,6 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
       });
     }, 1000);
 
-    // Simulated opponent reps (if standalone)
     oppIntervalRef.current = setInterval(() => {
       setOpponentScore((prev) => {
         const nextScore = prev + 1;
@@ -148,7 +304,6 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
     }, activeOpponent.speed || 2400);
   };
 
-  // Watch timeLeft for ending
   useEffect(() => {
     if (inDuel && timeLeft === 0) {
       const won = userScore >= opponentScore;
@@ -187,6 +342,16 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
     }
   };
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (cameraHelperRef.current) cameraHelperRef.current.stop();
+      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+      clearInterval(timerIntervalRef.current);
+      clearInterval(oppIntervalRef.current);
+    };
+  }, []);
+
   const mins = String(Math.floor(timeLeft / 60)).padStart(2, '0');
   const secs = String(timeLeft % 60).padStart(2, '0');
 
@@ -201,10 +366,10 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
               <span>JONLI PVP JANG MAYDONI</span>
             </div>
             <h2 className="text-xl sm:text-2xl font-black tracking-wide text-white">
-              60 Soniyalik Otjimaniya Duellari
+              60 Soniyalik Jonli Kamera Duellari
             </h2>
             <p className="text-xs sm:text-sm text-slate-400 mt-1 max-w-xl">
-              O'zbekistondagi boshqa atletlar bilan real vaqtda bellashing. AI ikkala tomonni ham adolatli sanaydi, g'olibga +150 XP beriladi!
+              Kamerangizni yoqing va raqib bilan to'g'ridan-to'g'ri jonli kadrda bellashing. AI ikkala tomonni ham adolatli sanaydi, g'olibga +150 XP beriladi!
             </p>
           </div>
 
@@ -229,7 +394,7 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
               <div className="w-8 h-8 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin"></div>
               <div>
                 <div className="text-sm font-bold text-cyan-300">Raqib qidirilmoqda...</div>
-                <div className="text-xs text-slate-400">Server: Toshkent Ping: 14ms (Socket.io)</div>
+                <div className="text-xs text-slate-400">Kamera faollashmoqda | Server: Toshkent</div>
               </div>
             </div>
             <button
@@ -244,45 +409,105 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
 
       {/* Duel Arena Battle Stage */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Player 1 (You) */}
+        {/* Player 1 (You) with Integrated Live Camera */}
         <div className="bg-slate-900/90 border-2 border-emerald-500/50 rounded-3xl p-4 sm:p-5 relative flex flex-col justify-between overflow-hidden shadow-xl shadow-emerald-500/10">
-          <div className="absolute top-0 right-0 bg-emerald-500 text-slate-950 text-[10px] font-black uppercase px-4 py-1 rounded-bl-xl tracking-wider">
-            Siz (Jonli)
+          <div className="absolute top-0 right-0 bg-emerald-500 text-slate-950 text-[10px] font-black uppercase px-4 py-1 rounded-bl-xl tracking-wider z-20">
+            Siz (Jonli Kamera)
           </div>
 
           {/* User Card Header */}
-          <div className="flex items-center space-x-3 mb-4">
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-emerald-500 to-cyan-500 p-0.5">
-              <div className="w-full h-full bg-slate-950 rounded-2xl flex items-center justify-center text-emerald-400 font-bold text-lg">
-                <i className="fa-solid fa-user-ninja"></i>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center space-x-3">
+              <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-emerald-500 to-cyan-500 p-0.5">
+                <div className="w-full h-full bg-slate-950 rounded-2xl flex items-center justify-center text-emerald-400 font-bold text-base">
+                  <i className="fa-solid fa-user-ninja"></i>
+                </div>
+              </div>
+              <div>
+                <h3 className="font-extrabold text-sm sm:text-base text-white">Siz (Mening Profilim)</h3>
+                <p className="text-xs text-emerald-400 flex items-center space-x-1">
+                  <i className="fa-solid fa-location-dot text-[10px]"></i>
+                  <span>Toshkent shahri • Olmos Liga</span>
+                </p>
               </div>
             </div>
-            <div>
-              <h3 className="font-extrabold text-base text-white">Siz (Mening Profilim)</h3>
-              <p className="text-xs text-emerald-400 flex items-center space-x-1">
-                <i className="fa-solid fa-location-dot text-[10px]"></i>
-                <span>Toshkent shahri • Olmos Liga</span>
-              </p>
+
+            {/* Toggle Camera button in player card */}
+            <button
+              onClick={toggleDuelWebcam}
+              className={`text-xs px-3 py-1.5 rounded-xl font-bold border transition flex items-center space-x-1.5 ${
+                isWebcamActive
+                  ? 'bg-red-500/20 text-red-300 border-red-500/40 hover:bg-red-500/30'
+                  : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
+              }`}
+            >
+              <i className="fa-solid fa-video"></i>
+              <span>{isWebcamActive ? "Kamera O'chirish" : "Kamerani Yoqish"}</span>
+            </button>
+          </div>
+
+          {/* Live User Viewport & Video Screen */}
+          <div className="relative bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 min-h-[200px] sm:min-h-[230px] flex flex-col items-center justify-center">
+            {/* Live Video Element */}
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className={`absolute inset-0 w-full h-full object-cover transform -scale-x-100 ${
+                isWebcamActive ? 'block' : 'hidden'
+              }`}
+            />
+
+            {/* Live Canvas for MediaPipe skeleton */}
+            <canvas
+              ref={canvasRef}
+              className="absolute inset-0 z-10 w-full h-full object-cover pointer-events-none"
+            />
+
+            {/* Placeholder when Camera is off */}
+            {!isWebcamActive && (
+              <div className="p-4 text-center z-0">
+                <div className="w-12 h-12 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 text-xl mx-auto mb-2">
+                  <i className="fa-solid fa-camera"></i>
+                </div>
+                <div className="text-xs font-bold text-slate-200">Kamera Ulanmagan</div>
+                <button
+                  onClick={toggleDuelWebcam}
+                  className="mt-2 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold px-3 py-1.5 rounded-xl text-xs inline-flex items-center space-x-1.5 shadow"
+                >
+                  <i className="fa-solid fa-video"></i>
+                  <span>Kamerani Yoqish</span>
+                </button>
+              </div>
+            )}
+
+            {/* Live Score Overlay Tag */}
+            <div className="absolute top-2 left-2 z-20 bg-slate-950/85 backdrop-blur-md px-3 py-1 rounded-xl border border-slate-700/80 text-[11px] text-slate-200">
+              {isWebcamActive && isAiDetecting ? (
+                <span className="text-emerald-400 font-bold flex items-center space-x-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span>AI: {currentAngle}° (Jonli)</span>
+                </span>
+              ) : isWebcamActive ? (
+                <span className="text-amber-400 font-medium">Odam kutilmoqda...</span>
+              ) : (
+                <span>Kamera o'chiq</span>
+              )}
+            </div>
+
+            {/* Rep score HUD inside video */}
+            <div className="absolute bottom-2 right-2 z-20 bg-slate-950/90 backdrop-blur-md px-4 py-1.5 rounded-2xl border border-emerald-500/50 shadow-xl flex items-center space-x-2">
+              <span className="text-[10px] uppercase font-bold text-slate-400">Siz:</span>
+              <span className="text-2xl font-black text-emerald-400">{userScore}</span>
             </div>
           </div>
 
-          {/* Live Score Screen */}
-          <div className="bg-slate-950 rounded-2xl p-6 text-center border border-slate-800 my-2 relative">
-            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">Takrorlashlar Soni</span>
-            <div className="text-6xl font-black text-emerald-400 tracking-tight my-2">
-              {userScore}
-            </div>
-            <div className="text-xs text-slate-400 flex justify-center items-center space-x-2">
-              <span className="inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
-              <span>{inDuel ? "Jonli AI Kamera hisoblamoqda" : "Kamera tayyor holatda"}</span>
-            </div>
-          </div>
-
-          {/* Self action buttons */}
-          <div className="mt-4 flex space-x-2">
+          {/* Self action test button */}
+          <div className="mt-3 flex space-x-2">
             <button
               onClick={handleManualRep}
-              className="flex-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center space-x-2 transition active:scale-95"
+              className="flex-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 py-2 rounded-xl text-xs font-bold flex items-center justify-center space-x-2 transition active:scale-95"
             >
               <i className="fa-solid fa-arrow-up"></i>
               <span>+1 Otjimaniya (AI Test)</span>
@@ -309,21 +534,21 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
           </div>
         </div>
 
-        {/* Player 2 (Opponent) */}
+        {/* Player 2 (Opponent) with Holographic Live Battle Feed */}
         <div className="bg-slate-900/90 border-2 border-red-500/40 rounded-3xl p-4 sm:p-5 relative flex flex-col justify-between overflow-hidden shadow-xl shadow-red-500/10">
-          <div className="absolute top-0 right-0 bg-red-600 text-white text-[10px] font-black uppercase px-4 py-1 rounded-bl-xl tracking-wider">
+          <div className="absolute top-0 right-0 bg-red-600 text-white text-[10px] font-black uppercase px-4 py-1 rounded-bl-xl tracking-wider z-20">
             Raqib
           </div>
 
           {/* Opponent Card Header */}
-          <div className="flex items-center space-x-3 mb-4">
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-red-500 to-amber-500 p-0.5">
-              <div className="w-full h-full bg-slate-950 rounded-2xl flex items-center justify-center text-red-400 font-bold text-lg">
+          <div className="flex items-center space-x-3 mb-3">
+            <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-red-500 to-amber-500 p-0.5">
+              <div className="w-full h-full bg-slate-950 rounded-2xl flex items-center justify-center text-red-400 font-bold text-base">
                 <i className="fa-solid fa-robot"></i>
               </div>
             </div>
             <div>
-              <h3 className="font-extrabold text-base text-white">{opponent.name}</h3>
+              <h3 className="font-extrabold text-sm sm:text-base text-white">{opponent.name}</h3>
               <p className="text-xs text-red-400 flex items-center space-x-1">
                 <i className="fa-solid fa-location-dot text-[10px]"></i>
                 <span>{opponent.location} • {opponent.xp.toLocaleString()} XP</span>
@@ -331,24 +556,37 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
             </div>
           </div>
 
-          {/* Opponent Live Score Screen */}
-          <div className="bg-slate-950 rounded-2xl p-6 text-center border border-slate-800 my-2 relative">
-            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">Raqib Natijasi</span>
-            <div className={`text-6xl font-black text-red-400 tracking-tight my-2 transition-transform duration-200 ${
-              oppPulse ? 'scale-110 text-red-300' : ''
-            }`}>
-              {opponentScore}
+          {/* Opponent Viewport Screen */}
+          <div className="relative bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 min-h-[200px] sm:min-h-[230px] flex flex-col items-center justify-center p-4">
+            {/* Holographic Arena Animated Icon */}
+            <div className="relative flex items-center justify-center my-auto">
+              <div className="w-20 h-20 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center text-3xl text-red-400 animate-pulse">
+                <i className="fa-solid fa-user-ninja"></i>
+              </div>
+              <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-500 animate-ping"></div>
             </div>
-            <div className="text-xs text-slate-400 flex justify-center items-center space-x-2">
-              <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse"></span>
-              <span>Jonli kamera orqali bajarmoqda</span>
+
+            {/* Opponent Tag */}
+            <div className="absolute top-2 left-2 z-20 bg-slate-950/85 backdrop-blur-md px-3 py-1 rounded-xl border border-slate-700/80 text-[11px] text-slate-300 flex items-center space-x-1.5">
+              <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse"></span>
+              <span>WebRTC Stream v2: Jonli</span>
+            </div>
+
+            {/* Opponent Live Score HUD inside viewport */}
+            <div className="absolute bottom-2 right-2 z-20 bg-slate-950/90 backdrop-blur-md px-4 py-1.5 rounded-2xl border border-red-500/50 shadow-xl flex items-center space-x-2">
+              <span className="text-[10px] uppercase font-bold text-slate-400">Raqib:</span>
+              <span className={`text-2xl font-black text-red-400 transition-transform duration-200 ${
+                oppPulse ? 'scale-125 text-red-300' : ''
+              }`}>
+                {opponentScore}
+              </span>
             </div>
           </div>
 
           {/* Opponent info tag */}
-          <div className="mt-4 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800 text-center">
+          <div className="mt-3 bg-slate-950/60 p-2 rounded-xl border border-slate-800 text-center">
             <span className="text-xs text-slate-400">
-              Raqib Pose AI: <strong className="text-slate-200">MediaPipe Stream v2</strong>
+              Raqib AI Pose: <strong className="text-slate-200">MediaPipe Stream Faol</strong>
             </span>
           </div>
         </div>

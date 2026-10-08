@@ -1,50 +1,65 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { UZBEKISTAN_REGIONS } from '../modals/AuthModal';
 
-const initialMockLeaderboard = [
-  { rank: 1, name: "Jasur_Fit", region: "Toshkent", duels: "24 / 28", reps: 1120, badge: "Olmos" },
-  { rank: 2, name: "Bekzod_99", region: "Samarqand", duels: "19 / 22", reps: 840, badge: "Olmos" },
-  { rank: 3, name: "Umid_Vorkaut", region: "Farg'ona", duels: "17 / 20", reps: 760, badge: "Oltin" },
-  { rank: 4, name: "Sherzod_Tashkent", region: "Toshkent", duels: "14 / 18", reps: 690, badge: "Oltin" },
-  { rank: 5, name: "Anvar_Buxoro", region: "Buxoro", duels: "12 / 15", reps: 620, badge: "Kumush" },
-  { rank: 6, name: "Doston_Andijon", region: "Andijon", duels: "11 / 14", reps: 580, badge: "Kumush" },
-  { rank: 7, name: "Xurshid_Xorazm", region: "Xorazm", duels: "9 / 12", reps: 510, badge: "Bronza" },
-  { rank: 8, name: "Sardor_Qashqadaryo", region: "Qashqadaryo", duels: "8 / 11", reps: 490, badge: "Bronza" }
+const baseAthletes = [
+  { id: 'ath_1', name: "Jasur_Fit", region: "Toshkent shahri", duels: "24 / 28", reps: 1120, badge: "Olmos" },
+  { id: 'ath_2', name: "Bekzod_99", region: "Samarqand", duels: "19 / 22", reps: 840, badge: "Olmos" },
+  { id: 'ath_3', name: "Umid_Vorkaut", region: "Farg'ona", duels: "17 / 20", reps: 760, badge: "Oltin" },
+  { id: 'ath_4', name: "Sherzod_Tashkent", region: "Toshkent shahri", duels: "14 / 18", reps: 690, badge: "Oltin" },
+  { id: 'ath_5', name: "Anvar_Buxoro", region: "Buxoro", duels: "12 / 15", reps: 620, badge: "Kumush" },
+  { id: 'ath_6', name: "Doston_Andijon", region: "Andijon", duels: "11 / 14", reps: 580, badge: "Kumush" },
+  { id: 'ath_7', name: "Xurshid_Xorazm", region: "Xorazm", duels: "9 / 12", reps: 510, badge: "Bronza" },
+  { id: 'ath_8', name: "Sardor_Qashqadaryo", region: "Qashqadaryo", duels: "8 / 11", reps: 490, badge: "Bronza" }
 ];
 
-export default function RankingTab() {
+export default function RankingTab({ currentUser }) {
   const [selectedRegion, setSelectedRegion] = useState('all');
-  const [leaderboard, setLeaderboard] = useState(initialMockLeaderboard);
-  const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    const fetchRankings = async () => {
-      setLoading(true);
-      try {
-        const query = selectedRegion === 'all' ? '' : `?region=${encodeURIComponent(selectedRegion)}`;
-        const res = await fetch(`/api/rankings${query}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data && Array.isArray(data.rankings)) {
-            setLeaderboard(data.rankings);
-            setLoading(false);
-            return;
-          }
-        }
-      } catch (err) {
-        // Fallback to local filter
-      }
+  // Dynamically compute full leaderboard combining static top athletes + currentUser with real reps!
+  const computedLeaderboard = useMemo(() => {
+    let list = [...baseAthletes];
 
-      const filtered = selectedRegion === 'all'
-        ? initialMockLeaderboard
-        : initialMockLeaderboard.filter(
-            (p) => p.region.toLowerCase() === selectedRegion.toLowerCase()
-          );
-      setLeaderboard(filtered);
-      setLoading(false);
-    };
+    if (currentUser) {
+      const userReps = (currentUser.totalReps || 0) + Math.floor((currentUser.xp || 1450) / 2.5);
+      const userDuels = `${currentUser.duelsWon || 0} / ${currentUser.duelsTotal || 0}`;
 
-    fetchRankings();
-  }, [selectedRegion]);
+      const userEntry = {
+        id: currentUser.id || 'current_user',
+        name: currentUser.fullName || `${currentUser.firstName} ${currentUser.lastName}`,
+        region: currentUser.region || 'Toshkent shahri',
+        duels: userDuels,
+        reps: userReps,
+        badge: userReps > 1000 ? "Olmos" : userReps > 600 ? "Oltin" : "Kumush",
+        isUser: true,
+        age: currentUser.age,
+      };
+
+      list.push(userEntry);
+    }
+
+    // Sort descending by total reps
+    list.sort((a, b) => b.reps - a.reps);
+
+    // Assign dynamic ranks
+    return list.map((item, idx) => ({
+      ...item,
+      rank: idx + 1,
+    }));
+  }, [currentUser]);
+
+  // Filter by selected region
+  const filteredList = useMemo(() => {
+    if (selectedRegion === 'all') return computedLeaderboard;
+    return computedLeaderboard.filter((p) =>
+      p.region.toLowerCase().includes(selectedRegion.toLowerCase()) ||
+      selectedRegion.toLowerCase().includes(p.region.toLowerCase())
+    );
+  }, [computedLeaderboard, selectedRegion]);
+
+  const top3 = computedLeaderboard.slice(0, 3);
+  const first = top3[0];
+  const second = top3[1];
+  const third = top3[2];
 
   return (
     <section className="space-y-5 animate-fadeIn">
@@ -56,7 +71,7 @@ export default function RankingTab() {
             <span>O'zbekiston Milliy Reytingi</span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Haftalik eng ko'p toza takrorlash bajargan va duel yutgan chempionlar
+            Ro'yxatdan o'tgan barcha atletlarning AI orqali tasdiqlangan jonli natijalari
           </p>
         </div>
 
@@ -69,13 +84,9 @@ export default function RankingTab() {
             className="bg-slate-800 text-slate-200 border border-slate-700 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-amber-400"
           >
             <option value="all">Butun O'zbekiston</option>
-            <option value="Toshkent">Toshkent</option>
-            <option value="Samarqand">Samarqand</option>
-            <option value="Farg'ona">Farg'ona</option>
-            <option value="Andijon">Andijon</option>
-            <option value="Buxoro">Buxoro</option>
-            <option value="Xorazm">Xorazm</option>
-            <option value="Qashqadaryo">Qashqadaryo</option>
+            {UZBEKISTAN_REGIONS.map((reg) => (
+              <option key={reg} value={reg}>{reg}</option>
+            ))}
           </select>
         </div>
       </div>
@@ -83,53 +94,68 @@ export default function RankingTab() {
       {/* Top 3 Podium Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {/* 2nd place */}
-        <div className="bg-slate-900/80 border border-slate-700/80 rounded-2xl p-4 text-center order-2 sm:order-1 relative shadow-lg">
-          <div className="w-7 h-7 rounded-full bg-slate-400 text-slate-950 font-black text-xs flex items-center justify-center mx-auto mb-2">
-            2
+        {second && (
+          <div className="bg-slate-900/80 border border-slate-700/80 rounded-2xl p-4 text-center order-2 sm:order-1 relative shadow-lg">
+            <div className="w-7 h-7 rounded-full bg-slate-400 text-slate-950 font-black text-xs flex items-center justify-center mx-auto mb-2">
+              2
+            </div>
+            <div className="w-14 h-14 rounded-2xl bg-slate-800 border-2 border-slate-400 mx-auto flex items-center justify-center text-slate-300 text-xl font-bold mb-2">
+              <i className="fa-solid fa-user-ninja"></i>
+            </div>
+            <h4 className="text-sm font-bold text-white flex items-center justify-center space-x-1">
+              <span>{second.name}</span>
+              {second.isUser && <span className="text-[9px] bg-emerald-500 text-slate-950 px-1.5 py-0.2 rounded font-black">SIZ</span>}
+            </h4>
+            <span className="text-[11px] text-slate-400">{second.region}</span>
+            <div className="mt-2 text-xs font-black text-slate-200 bg-slate-800 py-1 rounded-lg">
+              {second.reps.toLocaleString()} Takrorlash
+            </div>
           </div>
-          <div className="w-14 h-14 rounded-2xl bg-slate-800 border-2 border-slate-400 mx-auto flex items-center justify-center text-slate-300 text-xl font-bold mb-2">
-            <i className="fa-solid fa-user-ninja"></i>
-          </div>
-          <h4 className="text-sm font-bold text-white">Bekzod_99</h4>
-          <span className="text-[11px] text-slate-400">Samarqand</span>
-          <div className="mt-2 text-xs font-black text-slate-200 bg-slate-800 py-1 rounded-lg">
-            840 Takrorlash
-          </div>
-        </div>
+        )}
 
         {/* 1st place Champion */}
-        <div className="bg-gradient-to-b from-amber-950/40 to-slate-900 border-2 border-amber-500 rounded-2xl p-5 text-center order-1 sm:order-2 relative shadow-lg shadow-amber-500/10">
-          <div className="absolute -top-3 left-1/2 transform -translate-x-1/2 bg-amber-400 text-slate-950 text-[10px] font-black uppercase px-3 py-0.5 rounded-full flex items-center space-x-1 shadow">
-            <i className="fa-solid fa-crown text-[10px]"></i>
-            <span>Lider</span>
+        {first && (
+          <div className="bg-gradient-to-b from-amber-950/40 to-slate-900 border-2 border-amber-500 rounded-2xl p-5 text-center order-1 sm:order-2 relative shadow-lg shadow-amber-500/10">
+            <div className="absolute -top-3 left-1/2 transform -translate-x-1/2 bg-amber-400 text-slate-950 text-[10px] font-black uppercase px-3 py-0.5 rounded-full flex items-center space-x-1 shadow">
+              <i className="fa-solid fa-crown text-[10px]"></i>
+              <span>Lider</span>
+            </div>
+            <div className="w-8 h-8 rounded-full bg-amber-400 text-slate-950 font-black text-sm flex items-center justify-center mx-auto mt-1 mb-2 shadow">
+              1
+            </div>
+            <div className="w-16 h-16 rounded-2xl bg-amber-500/20 border-2 border-amber-400 mx-auto flex items-center justify-center text-amber-400 text-2xl font-bold mb-2">
+              <i className="fa-solid fa-medal"></i>
+            </div>
+            <h4 className="text-base font-extrabold text-white flex items-center justify-center space-x-1.5">
+              <span>{first.name}</span>
+              {first.isUser && <span className="text-[10px] bg-emerald-400 text-slate-950 px-1.5 py-0.5 rounded font-black">SIZ</span>}
+            </h4>
+            <span className="text-xs text-amber-400 font-semibold">{first.region}</span>
+            <div className="mt-3 text-sm font-black text-amber-300 bg-amber-500/20 py-1.5 rounded-xl border border-amber-500/30">
+              {first.reps.toLocaleString()} Takrorlash
+            </div>
           </div>
-          <div className="w-8 h-8 rounded-full bg-amber-400 text-slate-950 font-black text-sm flex items-center justify-center mx-auto mt-1 mb-2 shadow">
-            1
-          </div>
-          <div className="w-16 h-16 rounded-2xl bg-amber-500/20 border-2 border-amber-400 mx-auto flex items-center justify-center text-amber-400 text-2xl font-bold mb-2">
-            <i className="fa-solid fa-medal"></i>
-          </div>
-          <h4 className="text-base font-extrabold text-white">Jasur_Fit</h4>
-          <span className="text-xs text-amber-400 font-semibold">Toshkent • 12 G'alaba Seriyasi</span>
-          <div className="mt-3 text-sm font-black text-amber-300 bg-amber-500/20 py-1.5 rounded-xl border border-amber-500/30">
-            1,120 Takrorlash
-          </div>
-        </div>
+        )}
 
         {/* 3rd place */}
-        <div className="bg-slate-900/80 border border-amber-800/60 rounded-2xl p-4 text-center order-3 sm:order-3 relative shadow-lg">
-          <div className="w-7 h-7 rounded-full bg-amber-700 text-white font-black text-xs flex items-center justify-center mx-auto mb-2">
-            3
+        {third && (
+          <div className="bg-slate-900/80 border border-amber-800/60 rounded-2xl p-4 text-center order-3 sm:order-3 relative shadow-lg">
+            <div className="w-7 h-7 rounded-full bg-amber-700 text-white font-black text-xs flex items-center justify-center mx-auto mb-2">
+              3
+            </div>
+            <div className="w-14 h-14 rounded-2xl bg-slate-800 border-2 border-amber-700 mx-auto flex items-center justify-center text-amber-600 text-xl font-bold mb-2">
+              <i className="fa-solid fa-dumbbell"></i>
+            </div>
+            <h4 className="text-sm font-bold text-white flex items-center justify-center space-x-1">
+              <span>{third.name}</span>
+              {third.isUser && <span className="text-[9px] bg-emerald-500 text-slate-950 px-1.5 py-0.2 rounded font-black">SIZ</span>}
+            </h4>
+            <span className="text-[11px] text-slate-400">{third.region}</span>
+            <div className="mt-2 text-xs font-black text-slate-200 bg-slate-800 py-1 rounded-lg">
+              {third.reps.toLocaleString()} Takrorlash
+            </div>
           </div>
-          <div className="w-14 h-14 rounded-2xl bg-slate-800 border-2 border-amber-700 mx-auto flex items-center justify-center text-amber-600 text-xl font-bold mb-2">
-            <i className="fa-solid fa-dumbbell"></i>
-          </div>
-          <h4 className="text-sm font-bold text-white">Umid_Vorkaut</h4>
-          <span className="text-[11px] text-slate-400">Farg'ona</span>
-          <div className="mt-2 text-xs font-black text-slate-200 bg-slate-800 py-1 rounded-lg">
-            760 Takrorlash
-          </div>
-        </div>
+        )}
       </div>
 
       {/* Ranking Table */}
@@ -146,20 +172,14 @@ export default function RankingTab() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800 text-slate-200">
-              {loading ? (
-                <tr>
-                  <td colSpan="5" className="p-6 text-center text-slate-400">
-                    Yuklanmoqda...
-                  </td>
-                </tr>
-              ) : leaderboard.length === 0 ? (
+              {filteredList.length === 0 ? (
                 <tr>
                   <td colSpan="5" className="p-6 text-center text-slate-400">
                     Bu viloyat bo'yicha hozircha ma'lumot yo'q
                   </td>
                 </tr>
               ) : (
-                leaderboard.map((player) => {
+                filteredList.map((player) => {
                   let badgeColor = 'bg-slate-800 text-slate-300';
                   if (player.badge === 'Olmos') {
                     badgeColor = 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30';
@@ -167,14 +187,32 @@ export default function RankingTab() {
                     badgeColor = 'bg-amber-500/20 text-amber-300 border border-amber-500/30';
                   }
 
+                  const isMe = player.isUser;
+
                   return (
-                    <tr key={player.rank} className="hover:bg-slate-800/40 transition">
-                      <td className="p-3 sm:p-4 text-center font-bold font-mono text-slate-400">
-                        #{player.rank}
+                    <tr
+                      key={player.id || player.rank}
+                      className={`transition ${
+                        isMe
+                          ? 'bg-emerald-950/40 border-l-4 border-l-emerald-400 font-bold'
+                          : 'hover:bg-slate-800/40'
+                      }`}
+                    >
+                      <td className="p-3 sm:p-4 text-center font-bold font-mono">
+                        <span className={isMe ? 'text-emerald-400 font-black' : 'text-slate-400'}>
+                          #{player.rank}
+                        </span>
                       </td>
                       <td className="p-3 sm:p-4">
                         <div className="flex items-center space-x-2">
-                          <span className="font-bold text-white">{player.name}</span>
+                          <span className={isMe ? 'text-emerald-300 font-black text-sm' : 'font-bold text-white'}>
+                            {player.name}
+                          </span>
+                          {isMe && (
+                            <span className="text-[9px] bg-emerald-500 text-slate-950 px-1.5 py-0.5 rounded font-black tracking-wider">
+                              SIZ
+                            </span>
+                          )}
                           <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${badgeColor}`}>
                             {player.badge}
                           </span>
@@ -189,7 +227,7 @@ export default function RankingTab() {
                       <td className="p-3 sm:p-4 text-center text-emerald-400 font-mono">
                         {player.duels}
                       </td>
-                      <td className="p-3 sm:p-4 text-right font-black text-white font-mono">
+                      <td className={`p-3 sm:p-4 text-right font-black font-mono ${isMe ? 'text-emerald-400 text-base' : 'text-white'}`}>
                         {player.reps.toLocaleString()}
                       </td>
                     </tr>

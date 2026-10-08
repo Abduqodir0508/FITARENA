@@ -20,7 +20,7 @@ const mockOpponents = [
   { name: "Anvar_Buxoro", location: "Buxoro", xp: 1380, speed: 3000 }
 ];
 
-export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSession, onEndDuelSession }) {
+export default function DuelTab({ currentUser, userXP, onAddXP, soundEnabled, onStartDuelSession, onEndDuelSession, onDuelFinished }) {
   const [isSearching, setIsSearching] = useState(false);
   const [inDuel, setInDuel] = useState(false);
   const [timeLeft, setTimeLeft] = useState(60);
@@ -53,6 +53,9 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
 
   inDuelRef.current = inDuel;
   isWebcamActiveRef.current = isWebcamActive;
+
+  const myDisplayName = currentUser?.fullName || "Siz (Mening Profilim)";
+  const myRegion = currentUser?.region || "Toshkent shahri";
 
   // Handle automatic score increment from live camera pushup detection
   const handleCameraRep = useCallback(() => {
@@ -333,6 +336,10 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
       onEndDuelSession();
     }
 
+    if (onDuelFinished) {
+      onDuelFinished(won, userScore);
+    }
+
     if (won) {
       playSuccessFanfare(soundEnabled);
       onAddXP(150);
@@ -424,10 +431,10 @@ export default function DuelTab({ userXP, onAddXP, soundEnabled, onStartDuelSess
                 </div>
               </div>
               <div>
-                <h3 className="font-extrabold text-sm sm:text-base text-white">Siz (Mening Profilim)</h3>
+                <h3 className="font-extrabold text-sm sm:text-base text-white">{myDisplayName}</h3>
                 <p className="text-xs text-emerald-400 flex items-center space-x-1">
                   <i className="fa-solid fa-location-dot text-[10px]"></i>
-                  <span>Toshkent shahri • Olmos Liga</span>
+                  <span>{myRegion} • Olmos Liga</span>
                 </p>
               </div>
             </div>

@@ -21,7 +21,7 @@ export function setupDuelSocket(io) {
         socketId: socket.id,
         name: userData?.name || `Atlet_${socket.id.slice(0, 4)}`,
         location: userData?.location || 'Toshkent',
-        xp: userData?.xp || 1450,
+        xp: userData?.xp !== undefined ? Number(userData.xp) : 0,
       };
 
       if (waitingQueue.length > 0) {

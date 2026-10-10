@@ -1,83 +1,144 @@
 import express from 'express';
+import {
+  getLeaderboard,
+  saveOrUpdateUser,
+  addExpToUser,
+  readUsers,
+} from '../db/usersDb.js';
 
 const router = express.Router();
 
-let leaderboardData = [
-  { rank: 1, name: "Jasur_Fit", region: "Toshkent", duels: "24 / 28", reps: 1120, badge: "Olmos" },
-  { rank: 2, name: "Bekzod_99", region: "Samarqand", duels: "19 / 22", reps: 840, badge: "Olmos" },
-  { rank: 3, name: "Umid_Vorkaut", region: "Farg'ona", duels: "17 / 20", reps: 760, badge: "Oltin" },
-  { rank: 4, name: "Sherzod_Tashkent", region: "Toshkent", duels: "14 / 18", reps: 690, badge: "Oltin" },
-  { rank: 5, name: "Anvar_Buxoro", region: "Buxoro", duels: "12 / 15", reps: 620, badge: "Kumush" },
-  { rank: 6, name: "Doston_Andijon", region: "Andijon", duels: "11 / 14", reps: 580, badge: "Kumush" },
-  { rank: 7, name: "Xurshid_Xorazm", region: "Xorazm", duels: "9 / 12", reps: 510, badge: "Bronza" },
-  { rank: 8, name: "Sardor_Qashqadaryo", region: "Qashqadaryo", duels: "8 / 11", reps: 490, badge: "Bronza" }
-];
-
-// GET /api/rankings - Get all or region filtered rankings
+/**
+ * GET /api/rankings
+ * Qat'iy bazadagi haqiqiy foydalanuvchilar ro'yxati (mock datalar yo'q)
+ * ORDER BY exp DESC, faqat TOP-20 qaytariladi.
+ */
 router.get('/', (req, res) => {
-  const { region } = req.query;
+  try {
+    const { region = 'all', userId } = req.query;
+    const leaderboard = getLeaderboard(region, userId);
 
-  if (!region || region === 'all') {
-    return res.json({
+    res.json({
       success: true,
-      region: 'all',
-      total: leaderboardData.length,
-      rankings: leaderboardData,
+      region,
+      total: leaderboard.top20.length,
+      totalUsersInDb: leaderboard.totalUsers,
+      rankings: leaderboard.top20,
+      currentUserRankInfo: leaderboard.currentUserRankInfo,
+    });
+  } catch (err) {
+    console.error('[rankingRoutes] Xatolik:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Reytingni yuklashda server xatoligi yuz berdi',
     });
   }
-
-  const filtered = leaderboardData.filter(
-    (item) => item.region.toLowerCase() === region.trim().toLowerCase()
-  );
-
-  res.json({
-    success: true,
-    region,
-    total: filtered.length,
-    rankings: filtered,
-  });
 });
 
-// POST /api/rankings/score - Submit or update score
-router.post('/score', (req, res) => {
-  const { name, region, reps, duels, badge } = req.body;
-  if (!name || !region || reps === undefined) {
-    return res.status(400).json({
+/**
+ * POST /api/rankings/user
+ * Yangi foydalanuvchini ro'yxatdan o'tkazish yoki profilini yangilash
+ * Boshlang'ich daraja: 0, EXP: 0
+ */
+router.post('/user', (req, res) => {
+  try {
+    const userData = req.body;
+    if (!userData || !userData.id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Foydalanuvchi ma\'lumotlari to\'liq emas',
+      });
+    }
+
+    const savedUser = saveOrUpdateUser(userData);
+    res.json({
+      success: true,
+      message: 'Foydalanuvchi muvaffaqiyatli saqlandi',
+      user: savedUser,
+    });
+  } catch (err) {
+    console.error('[rankingRoutes] Foydalanuvchi saqlashda xatolik:', err);
+    res.status(500).json({
       success: false,
-      message: "Ism, viloyat va takrorlashlar soni talab qilinadi",
+      message: 'Foydalanuvchini saqlashda server xatoligi yuz berdi',
     });
   }
+});
 
-  const existingIndex = leaderboardData.findIndex(
-    (p) => p.name.toLowerCase() === name.toLowerCase()
-  );
+/**
+ * POST /api/rankings/add-exp
+ * Mashq (otjimaniya, turnik) yoki 1v1 duel yakunlanganda EXP ni hisobga qo'shish
+ */
+router.post('/add-exp', (req, res) => {
+  try {
+    const { userId, amount, repsDelta = 0, duelWon = null } = req.body;
+    if (!userId || amount === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: 'Foydalanuvchi ID va EXP miqdori talab qilinadi',
+      });
+    }
 
-  if (existingIndex !== -1) {
-    leaderboardData[existingIndex].reps += Number(reps);
-    leaderboardData[existingIndex].region = region || leaderboardData[existingIndex].region;
-  } else {
-    leaderboardData.push({
-      rank: leaderboardData.length + 1,
-      name,
-      region,
-      duels: duels || "1 / 1",
-      reps: Number(reps),
-      badge: badge || "Bronza",
+    const updatedUser = addExpToUser(userId, Number(amount), Number(repsDelta), duelWon);
+    if (!updatedUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'Foydalanuvchi bazada topilmadi',
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `${amount} EXP muvaffaqiyatli hisobga qo'shildi`,
+      user: updatedUser,
+    });
+  } catch (err) {
+    console.error('[rankingRoutes] EXP qo\'shishda xatolik:', err);
+    res.status(500).json({
+      success: false,
+      message: 'EXP qo\'shishda server xatoligi yuz berdi',
     });
   }
+});
 
-  // Re-sort and re-rank
-  leaderboardData.sort((a, b) => b.reps - a.reps);
-  leaderboardData = leaderboardData.map((item, idx) => ({
-    ...item,
-    rank: idx + 1,
-  }));
+/**
+ * POST /api/rankings/score
+ * Natijani yangilash (moslashuvchanlik uchun)
+ */
+router.post('/score', (req, res) => {
+  try {
+    const { id, name, region, reps, exp, badge } = req.body;
+    if (!id && !name) {
+      return res.status(400).json({
+        success: false,
+        message: 'Foydalanuvchi ma\'lumotlari kiritilmadi',
+      });
+    }
 
-  res.json({
-    success: true,
-    message: "Natija muvaffaqiyatli saqlandi",
-    rankings: leaderboardData,
-  });
+    const userId = id || `user_${name.toLowerCase().replace(/\s+/g, '_')}`;
+    const user = saveOrUpdateUser({
+      id: userId,
+      fullName: name,
+      firstName: name.split(' ')[0] || name,
+      lastName: name.split(' ')[1] || '',
+      region: region || 'Toshkent shahri',
+      xp: exp !== undefined ? Number(exp) : undefined,
+      totalReps: Number(reps) || 0,
+      badge,
+    });
+
+    res.json({
+      success: true,
+      message: 'Natija muvaffaqiyatli saqlandi',
+      user,
+    });
+  } catch (err) {
+    console.error('[rankingRoutes] Score yangilashda xatolik:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Natijani saqlashda server xatoligi',
+    });
+  }
 });
 
 export default router;

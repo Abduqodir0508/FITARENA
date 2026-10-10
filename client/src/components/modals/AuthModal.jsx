@@ -56,11 +56,12 @@ export default function AuthModal({ isOpen, onClose, onRegister, initialUser, so
       region,
       gender,
       registeredAt: initialUser?.registeredAt || new Date().toISOString(),
-      xp: initialUser?.xp || 1450,
+      xp: initialUser?.xp !== undefined ? Number(initialUser.xp) : 0,
+      level: Math.floor((initialUser?.xp !== undefined ? Number(initialUser.xp) : 0) / 100),
       totalReps: initialUser?.totalReps || 0,
       duelsWon: initialUser?.duelsWon || 0,
       duelsTotal: initialUser?.duelsTotal || 0,
-      badge: initialUser?.badge || "Olmos",
+      badge: initialUser?.badge || "Boshlang'ich",
     };
 
     playSuccessFanfare(soundEnabled);
@@ -72,14 +73,14 @@ export default function AuthModal({ isOpen, onClose, onRegister, initialUser, so
     <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
       <div className="bg-slate-900 border-2 border-emerald-500/60 rounded-3xl p-6 max-w-md w-full shadow-2xl relative animate-fadeIn">
         {/* Header */}
-        <div className="text-center mb-5">
-          <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-br from-emerald-500 to-cyan-500 flex items-center justify-center text-slate-950 text-2xl font-black mb-3 shadow-lg shadow-emerald-500/20">
+        <div className="text-center mb-4 sm:mb-5">
+          <div className="w-12 h-12 sm:w-14 sm:h-14 mx-auto rounded-2xl bg-gradient-to-br from-emerald-500 to-cyan-500 flex items-center justify-center text-slate-950 text-xl sm:text-2xl font-black mb-2.5 sm:mb-3 shadow-lg shadow-emerald-500/20">
             <i className="fa-solid fa-id-card"></i>
           </div>
-          <h2 className="text-xl font-black text-white">
+          <h2 className="text-lg sm:text-xl font-black text-white">
             {initialUser ? "Profilni Tahrirlash" : "FitArena'da Ro'yxatdan O'tish"}
           </h2>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-[11px] sm:text-xs text-slate-400 mt-1">
             Milliy reyting va 1v1 duellarda qatnashish uchun ma'lumotlaringizni kiriting
           </p>
         </div>
